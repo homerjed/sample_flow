@@ -301,7 +301,7 @@ if __name__ == "__main__":
     print("True parameters", parameters)
 
     plt.figure(dpi=200)
-    plt.hist2d(*states.position["pi"].squeeze().T, bins=100, cmap="PuOr")
+    plt.hist2d(*states.position["pi"].squeeze().T, bins=100, cmap="gray_r")
     plt.scatter(*parameters.T, color="r", marker="x")
     plt.xlabel("A")
     plt.ylabel("B")
