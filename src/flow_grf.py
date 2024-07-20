@@ -9,7 +9,6 @@ from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 import powerbox as pbox
 from tqdm import trange
-import tensorflow_probability.substrates.jax as tfp
 import tensorflow_probability.substrates.jax.distributions as tfd
 
 
@@ -28,11 +27,8 @@ def make_field(seed, A, B, data_dim):
 def make_fields(parameters, data_dim):
     fields = []
     for i in range(len(parameters)):
-        fields.append(
-            make_field(
-                i, parameters[i, 0], parameters[i, 1], data_dim
-            )
-        )
+        A, B = parameters[i]
+        fields.append(make_field(i, A, B, data_dim))
     return jnp.stack(fields)
 
 
@@ -113,8 +109,9 @@ class RealNVP(nn.Module):
             ) 
             for _ in range(self.n_transforms)
         ]
-        self.base_dist = tfp.distributions.Normal(
-            loc=jnp.zeros(self.d_params), scale=jnp.ones(self.d_params)
+        self.base_dist = tfd.Normal(
+            loc=jnp.zeros(self.d_params), 
+            scale=jnp.ones(self.d_params)
         )
     
     def log_prob(self, x, q):
@@ -148,22 +145,28 @@ if __name__ == "__main__":
 
     key = jr.key(0)
 
-    # Model and training
-    data_dim = 64
-    parameter_dim = 2
-    n_data = 50_000
-    n_samples = 10
-    n_steps = 50_000
-    n_batch = 128
-    lr = 1e-4
-    # MCMC sampling
-    num_samples = 10_000
-    num_chains = 1
-    inv_mass_matrix = jnp.ones((parameter_dim,)) * 0.1 
-    step_size = 1e-2
     # Data
-    lower = jnp.array([0.1, 1.])
-    upper = jnp.array([1.5, 4.])
+    data_dim            = 32 # Dimensionality of 1D GRF
+    parameter_dim       = 2  # A and B in P(k) = Ak^-B
+    lower               = jnp.array([0.1, 1.])
+    upper               = jnp.array([1.5, 4.])
+    use_scaler          = False # Standardising scaler on data or not
+    # Model and training
+    n_data              = 50_000
+    d_hidden            = 32
+    n_samples           = 10
+    n_steps             = 10_000
+    n_batch             = 128
+    lr                  = 1e-4
+    # MCMC sampling
+    n_obs               = 50 # Number of i.i.d. datavectors to sample
+    num_samples         = 20_000
+    num_chains          = 1
+    inv_mass_matrix     = jnp.ones((parameter_dim,)) * 0.1 
+    step_size           = 1e-2
+
+    # True parameters to measure datavectors for posterior at 
+    parameters = jnp.array([[0.8, 3.]]) 
 
     parameter_prior = tfd.Blockwise(
         [tfd.Uniform(lower[p], upper[p]) for p in range(parameter_dim)]
@@ -174,12 +177,19 @@ if __name__ == "__main__":
     q = parameter_prior.sample((n_data,), seed=key_q)
     x = make_fields(q, data_dim)
 
-    scaler = StandardScaler()
-    x = scaler.fit_transform(x)
+    # Scale data or not
+    if use_scaler:
+        scaler = StandardScaler()
+        transform = scaler.fit_transform
+        x = transform(x)
+    else:
+        transform = lambda x: x
 
     assert jnp.isfinite(x).all()
 
-    model = RealNVP(d_params=data_dim, d_q=parameter_dim, d_hidden=256)
+    model = RealNVP(
+        d_params=data_dim, d_q=parameter_dim, d_hidden=d_hidden
+    )
     params = model.init(key_init, x[:2], q[:2])
 
     assert jnp.isfinite(model.apply(params, x[:3], q[:3]).mean())
@@ -203,7 +213,9 @@ if __name__ == "__main__":
         for step in steps:
 
             # Draw a random batches from x
-            idx = jr.choice(jr.fold_in(key, step), x.shape[0], shape=(n_batch,))
+            idx = jr.choice(
+                jr.fold_in(key, step), x.shape[0], shape=(n_batch,)
+            )
             
             x_batch, q_batch = x[idx], q[idx]
 
@@ -248,19 +260,24 @@ if __name__ == "__main__":
 
     key_q, key_sample = jr.split(key)
 
-    # Datavector and its true parameters
-    parameters = parameter_prior.sample((1,), seed=key)
-    observed = make_fields(parameters, data_dim)
+    # Generate i.i.d. measurements at true parameters
+    obs = []
+    for i in range(n_obs):
+        obs.append(make_fields(parameters, data_dim))
+    observed = jnp.concatenate(obs)
+
 
     def density_fn(x, observed):
-        pi = x["pi"][None, :] 
+        # Posterior density function
+        pi = x["pi"]
+        pi = pi[jnp.newaxis, :] if n_obs == 1 else jnp.stack([pi] * n_obs)
         log_prob = model.apply(params, observed, pi) + parameter_prior.log_prob(pi)
-        return log_prob.squeeze()
+        return log_prob.sum()
 
 
     # Initialise MCMC on posterior function (scaling data, very important)
     nuts = blackjax.nuts(
-        partial(density_fn, observed=scaler.fit_transform(observed)), 
+        partial(density_fn, observed=transform(observed)), 
         step_size, 
         inv_mass_matrix
     )
