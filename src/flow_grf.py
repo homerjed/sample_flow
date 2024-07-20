@@ -157,7 +157,7 @@ if __name__ == "__main__":
     use_scaler          = False # Standardising scaler on data or not
     # Model and training
     n_data              = 50_000
-    d_hidden            = 128
+    d_hidden            = 8 
     n_samples           = 10
     n_steps             = 20_000
     n_batch             = 256
@@ -230,6 +230,7 @@ if __name__ == "__main__":
             steps.set_postfix(val=loss)
             losses.append(loss)
 
+    # Sample some data
     q = parameter_prior.sample((n_samples,), seed=key)
     x_sample = model.apply(params, key_sample, (n_samples,), q, method=model.sample)
 
