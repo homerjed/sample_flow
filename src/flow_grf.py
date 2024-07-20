@@ -5,11 +5,14 @@ import jax.random as jr
 import flax.linen as nn
 import blackjax
 import optax
+import numpy as np
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 import powerbox as pbox
 from tqdm import trange
 import tensorflow_probability.substrates.jax.distributions as tfd
+import pandas as pd
+from chainconsumer import Chain, ChainConsumer
 
 
 def make_field(seed, A, B, data_dim):
@@ -148,18 +151,19 @@ if __name__ == "__main__":
     # Data
     data_dim            = 32 # Dimensionality of 1D GRF
     parameter_dim       = 2  # A and B in P(k) = Ak^-B
+    param_names         = ["A", "B"]
     lower               = jnp.array([0.1, 1.])
     upper               = jnp.array([1.5, 4.])
     use_scaler          = False # Standardising scaler on data or not
     # Model and training
     n_data              = 50_000
-    d_hidden            = 32
+    d_hidden            = 128
     n_samples           = 10
-    n_steps             = 10_000
-    n_batch             = 128
+    n_steps             = 20_000
+    n_batch             = 256
     lr                  = 1e-4
     # MCMC sampling
-    n_obs               = 50 # Number of i.i.d. datavectors to sample
+    n_obs               = 100 # Number of i.i.d. datavectors to sample
     num_samples         = 20_000
     num_chains          = 1
     inv_mass_matrix     = jnp.ones((parameter_dim,)) * 0.1 
@@ -261,18 +265,15 @@ if __name__ == "__main__":
     key_q, key_sample = jr.split(key)
 
     # Generate i.i.d. measurements at true parameters
-    obs = []
-    for i in range(n_obs):
-        obs.append(make_fields(parameters, data_dim))
-    observed = jnp.concatenate(obs)
+    observed = make_fields(jnp.concatenate([parameters] * n_obs), data_dim)
 
 
     def density_fn(x, observed):
         # Posterior density function
         pi = x["pi"]
-        pi = pi[jnp.newaxis, :] if n_obs == 1 else jnp.stack([pi] * n_obs)
-        log_prob = model.apply(params, observed, pi) + parameter_prior.log_prob(pi)
-        return log_prob.sum()
+        pi_ = jnp.stack([pi] * n_obs) # Stacked to match obs. dimension
+        log_prob = model.apply(params, observed, pi_).sum() + parameter_prior.log_prob(pi)
+        return log_prob
 
 
     # Initialise MCMC on posterior function (scaling data, very important)
@@ -304,4 +305,19 @@ if __name__ == "__main__":
     plt.xlabel("A")
     plt.ylabel("B")
     plt.savefig("mcmc.png")
+    plt.close()
+
+    c = ChainConsumer()
+    posterior_df = pd.DataFrame(
+        states.position["pi"].squeeze(), columns=param_names
+    ).assign(log_posterior=states.logdensity)
+
+    c.add_chain(Chain(samples=posterior_df, name="Flow posterior", shade_alpha=0.))
+    c.add_marker(location=dict(zip(param_names, np.asarray(parameters).squeeze())), name=r"$\pi$", color="k")
+    fig = c.plotter.plot()
+    fig.set_dpi(200)
+    fig.set_figwidth(5.)
+    fig.set_figheight(5.)
+    fig.suptitle("Flow posterior")
+    plt.savefig("posterior.png")
     plt.close()
